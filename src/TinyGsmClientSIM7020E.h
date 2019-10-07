@@ -893,7 +893,6 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
         } else if (data.endsWith(GF(GSM_NL "+CSONMI:"))){
             int mux = stream.readStringUntil(',').toInt();
             int len = stream.readStringUntil(',').toInt();
-            DBG("### +CSONMI SOCKET: ", mux, ", ERROR: ", len);
             
             int len_orig = len;
             if (len > sockets[mux]->rx.free()) {
@@ -913,22 +912,14 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
             DBG("### Got Data:", len_orig, "on", mux);
         } else if (data.endsWith(GF("+CSOERR:"))) {
           int mux = stream.readStringUntil(',').toInt();
-          int err_code = stream.readStringUntil('\n').toInt();
-          DBG("### +CSOERR SOCKET: ", mux, ", ERROR: ", err_code);
           if (mux >= 0 && mux < TINY_GSM_MUX_COUNT) {
             sockets[mux]->sock_connected = false;
           }
           data = "";
           DBG("### Closed: ", mux);
-        } else if (data.endsWith(GF(GSM_NL "SEND:"))){
-          int mux = stream.readStringUntil(',').toInt();
-          int len = stream.readStringUntil('\n').toInt();
-          data = "";
-          DBG(GF("SEND: MUX: "), mux, ", LEN: ", len);
         } else if (data.endsWith(GF("+CCOAPNMI:"))) {
           int mux = stream.readStringUntil(',').toInt();
           int len = stream.readStringUntil(',').toInt();
-          DBG("### +COAP ID: ", mux, ", LEN: ", len);
           int len_orig = len;
           len *=2;
           if (len > sockets[mux]->rx.free()) {
