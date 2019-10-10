@@ -11,10 +11,9 @@
 //#pragma message("TinyGSM:  TinyGsmClientSIM7020E")
 
 //#define TINY_GSM_DEBUG Serial
-//#define TINY_GSM_USE_HEX
 
 #if !defined(TINY_GSM_RX_BUFFER)
-  #define TINY_GSM_RX_BUFFER 128
+  #define TINY_GSM_RX_BUFFER 256
 #endif
 
 #define TINY_GSM_MUX_COUNT 5
@@ -24,6 +23,7 @@
 #define GSM_NL "\r\n"
 static const char GSM_OK[] TINY_GSM_PROGMEM = "OK" GSM_NL;
 static const char GSM_ERROR[] TINY_GSM_PROGMEM = "ERROR" GSM_NL;
+static const char hexmap[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
 
 enum SimStatus {
   SIM_ERROR = 0,
@@ -128,7 +128,6 @@ public:
   class CoAPClient : public GsmClient
   {
   friend class TinyGsmSim7020E;
-  #define TINY_GSM_RX_BUFFER 128
   typedef TinyGsmFifo<uint8_t, TINY_GSM_RX_BUFFER> RxFifo;
   public:
     CoAPClient() {}
@@ -227,6 +226,126 @@ public:
     }
 };
 
+class GsmClientSecure : public GsmClient
+{
+  friend class TinyGsmSim7020E;
+  typedef TinyGsmFifo<uint8_t, TINY_GSM_RX_BUFFER> RxFifo;
+public:
+  GsmClientSecure() {}
+  GsmClientSecure(TinyGsmSim7020E& modem, uint8_t mux = 1)
+  : GsmClient(modem, mux)
+  { }
+
+  bool init(TinyGsmSim7020E* modem, uint8_t mux = 1) {
+    this->at = modem;
+    this->mux = mux;
+    at->sockets[mux] = this;
+    return true;
+  }
+
+  virtual int connect(const char *host, uint16_t port, int timeout_s) {
+    DBG(GF("### connect "), this->sock_connected);
+    stop();
+    rx.clear();
+    delay(2000);
+    this->sock_connected = modemConnect(host, port, mux, true, timeout_s);
+    if (sock_connected) {
+      at->sockets[mux] = this;
+    }
+    return this->sock_connected;
+  }
+
+  TINY_GSM_CLIENT_CONNECT_OVERLOADS()
+
+  virtual ~GsmClientSecure(){}
+
+  virtual void stop(uint32_t maxWaitMs) {
+    DBG(GF("### stop"));
+    TINY_GSM_YIELD();
+    at->sendAT(GF("+CTLSCLOSE="), mux);
+    this->sock_connected = false;
+    at->waitResponse();
+    rx.clear();
+  }
+
+  virtual void stop() { stop(15000L); }
+
+  virtual size_t write(const uint8_t *buf, size_t size) { 
+    TINY_GSM_YIELD(); 
+    at->maintain(); 
+    return modemSend(buf, size, mux); 
+  }
+
+  virtual size_t write(uint8_t c) {
+      return write(&c, 1);
+    }
+    
+  virtual size_t write(const char *str) { 
+    if (str == NULL) return 0; 
+    return write((const uint8_t *)str, strlen(str)); 
+  }
+
+private:
+  bool modemConnect(const char* host, uint16_t port, uint8_t mux, 
+                                 bool ssl = false, int timeout_s = 75){
+    DBG(GF("### TLS CONN: "), host, ":", port, ", MUX: ", mux);
+    uint32_t timeout_ms = ((uint32_t)timeout_s)*1000;
+
+    at->sendAT(GF("+CTLSCFG="), mux, GF(",1,\""), host, GF("\",2,"), port, GF(",3,0,4,0,5,0")); 
+    if(at->waitResponse(timeout_ms, GSM_OK) != 1){
+      DBG(GF("### TLS failed +CTLSCFG"));
+      return false;
+    }
+
+    at->sendAT(GF("+CTLSCONN="), mux, GF(",1"));
+    if(at->waitResponse(timeout_ms, GSM_OK) != 1){
+      DBG(GF("### TLS failed +CTLSCONN 1"));
+      return false;
+    }
+
+    if(at->waitResponse(timeout_ms, GF("+CTLSCONN:")) != 1){
+      DBG(GF("### TLS failed +CTLSCONN 2"));
+      return false;
+    }
+    at->streamSkipUntil(',');
+    if(at->stream.readStringUntil('\n').toInt() != 1){
+      DBG(GF("### TLS failed +CTLSCONN incorrect state"));
+      return false;
+    }
+
+    at->waitResponse(100);
+    DBG(GF("### TLS created: "), mux);
+    return true;
+  }
+
+  int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
+    DBG(GF("### TLS SEND: "), (char*)buff, ", LEN: ", len, ", ID: ", mux);
+
+    at->waitResponse(50);
+    String s = at->hexStr((char*)buff, len);
+    at->sendAT(GF("+CTLSSEND="), mux, GF(','), s.length(), GF(",\""), s, GF("\",802"));
+    if (at->waitResponse(2000, GSM_OK) != 1){
+      DBG(GF("### TLS SEND: FAILED"));
+      return 0;
+    }
+    if (at->waitResponse(5000, GF("+CTLSSEND:")) != 1){
+      DBG(GF("### TLS SEND: FAILED"));
+      return 0;
+    }
+    at->stream.readStringUntil('\n');
+
+    at->sendAT(GF("+CTLSRECV=1,512,802"));
+    if (at->waitResponse(2000, GSM_OK, GSM_ERROR) != 1){
+      DBG(GF("### TLS SEND +CTLSRECV FAILED"));
+      //return 0;
+    }
+
+    return len;
+  }
+
+  
+};
+
 public:
 
   TinyGsmSim7020E(Stream& stream)
@@ -253,6 +372,8 @@ public:
     }
     sendAT(GF("+IFC=0,0;+IPR=115200"));
     waitResponse(GSM_OK);
+    sendAT(GF("E0"));
+    waitResponse();
     DBG(GF("### Modem:"), getModemName());
 
     int ret = getSimStatus();
@@ -311,7 +432,9 @@ TINY_GSM_MODEM_SET_BAUD_IPR()
 TINY_GSM_MODEM_MAINTAIN_LISTEN()
 
   bool factoryDefault() {
-    sendAT(GF("&F0&W"));  // Factory + Reset + Echo Off + Write
+    sendAT(GF("&F0"));  // Factory 
+    waitResponse();
+    sendAT(GF("E0"));  // Echo Off
     waitResponse();
     sendAT(GF("+IPR=0"));   // Auto-baud
     waitResponse();
@@ -328,7 +451,7 @@ TINY_GSM_MODEM_MAINTAIN_LISTEN()
 TINY_GSM_MODEM_GET_INFO_ATI()
 
   bool hasSSL() {
-    return false;
+    return true;
   }
 
   bool hasWifi() {
@@ -697,7 +820,7 @@ TINY_GSM_MODEM_GET_GPRS_IP_CONNECTED()
 
 protected:
 
-  virtual bool modemConnect(const char* host, uint16_t port, uint8_t *mux,
+  bool modemConnect(const char* host, uint16_t port, uint8_t *mux,
                     bool ssl = false, int timeout_s = 75){
     if (ssl) {
       DBG("### SSL not yet supported on this module!");
@@ -713,13 +836,13 @@ protected:
     DBG(GF("### +CSOC: OK, "), newMux);
 
     // sendAT(GF("+CSORCVFLAG=1"));
-    // waitResponse(2000L, GSM_OK);
+    // waitResponse(2000L, GSM_OK, GSM_ERROR);
 
     // sendAT(GF("+CSOSENDFLAG=1"));
-    // waitResponse(2000L, GSM_OK);
+    // waitResponse(2000L, GSM_OK, GSM_ERROR);
 
     // sendAT(GF("+CSOALIVE=0,1"));
-    // waitResponse(2000L, GSM_OK);
+    // waitResponse(2000L, GSM_OK, GSM_ERROR);
 
     sendAT(GF("+CSOCON=0,"), port, GF(",\""), host, GF("\""));
     if (waitResponse(60000L, GSM_OK) != 1){
@@ -732,15 +855,12 @@ protected:
     return true;
   }
 
-  const char hexmap[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-
   String hexStr(const char *data, int len)
   {
     String s = "";
     for (int i = 0; i < len; ++i) {
       s += hexmap[(data[i] & 0xF0) >> 4];
       s += hexmap[data[i] & 0x0F];
-      //DBG(GF("### HEX: "), data[i], s[2 * i], s[2 * i + 1]);
     }
     return s;
   }
@@ -761,6 +881,11 @@ protected:
     }
     return len;
   }
+
+  /*
+    using this method faced a problem with missing received "DATA ACCEPT:" respond
+    Instead, use another method, sending in HEX format
+  */
 
   // int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
   //   DBG(GF("### CMD SEND: "), (char*)buff, ", LEN: ", len, ", MUX: ", mux);
@@ -893,6 +1018,7 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
         } else if (data.endsWith(GF(GSM_NL "+CSONMI:"))){
             int mux = stream.readStringUntil(',').toInt();
             int len = stream.readStringUntil(',').toInt();
+            DBG("### +CSONMI SOCKET: ", mux, ", ERROR: ", len);
             
             int len_orig = len;
             if (len > sockets[mux]->rx.free()) {
@@ -920,6 +1046,7 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
         } else if (data.endsWith(GF("+CCOAPNMI:"))) {
           int mux = stream.readStringUntil(',').toInt();
           int len = stream.readStringUntil(',').toInt();
+          DBG("### +COAP ID: ", mux, ", LEN: ", len);
           int len_orig = len;
           len *=2;
           if (len > sockets[mux]->rx.free()) {
@@ -937,6 +1064,54 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
           }
           data = "";
           DBG("### Got Data:", len_orig, "on", mux);
+        } else if (data.endsWith(GF("+CTLSRECV:"))){
+            //+CTLSRECV: 1,-80
+            //+CTLSRECV: 1,10,"00000100C8",802
+            int mux = stream.readStringUntil(',').toInt();
+            DBG(GF("### +CTLSRECV TLS ID: "), mux);
+            int len;
+            char c = stream.read();
+            if (c == '-'){
+              // +CTLSRECV with error code
+              len = stream.readStringUntil('\n').toInt();
+              len*=-1;
+              DBG("### +CTLSRECV TLS ID: ", mux, ", ERROR: ", len);
+            }else{
+              // normal case
+              len = (c + stream.readStringUntil(',')).toInt();
+              DBG("### +CTLSRECV TLS ID: ", mux, ", LEN: ", len);
+            }
+
+            
+            if (len >= 0){
+              stream.readStringUntil('"'); //received data into quotes "", skip at the begin
+            
+              int len_orig = len/2;
+              if (len_orig > sockets[mux]->rx.free()) {
+                DBG("### Buffer overflow: ", len, "->", sockets[mux]->rx.free());
+              } else {
+                DBG("### Got: ", len_orig, "->", sockets[mux]->rx.free());
+              }
+              String hex = stream.readStringUntil('"');
+              //stream.readStringUntil('\n'); //received data into quotes "", skip at the end
+              streamSkipUntil('\n');        //received data into quotes "", skip at the end
+              hex = TinyGsmDecodeHex8bit(hex);
+              for (unsigned i=0; i<hex.length(); i++) {
+                sockets[mux]->rx.put(hex[i]);
+              }
+             
+              sockets[mux]->got_data = true;
+              sockets[mux]->sock_available = hex.length();
+              if (len_orig > sockets[mux]->available()) {
+                DBG("### Fewer characters received than expected: ", sockets[mux]->available(), " vs ", len_orig);
+              }
+              
+              DBG(GF("### Got Data:"), len_orig, GF("on"), mux);
+            }else{
+              sockets[mux]->sock_connected = false;
+              DBG(GF("### Socket closed"));
+            }
+            data = "";
         }
       }
     } while (millis() - startMillis < timeout_ms);

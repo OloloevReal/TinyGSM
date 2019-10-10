@@ -47,7 +47,7 @@
   typedef TinyGsmSim7020E TinyGsm;
   typedef TinyGsmSim7020E::GsmClient TinyGsmClient;
   typedef TinyGsmSim7020E::CoAPClient TinyGsmCoAPClient;
-  // typedef TinyGsmSim7020E::GsmClientSecure TinyGsmClientSecure; TODO!
+  typedef TinyGsmSim7020E::GsmClientSecure TinyGsmClientSecure;
 
 #elif defined(TINY_GSM_MODEM_SIM5320) || defined(TINY_GSM_MODEM_SIM5360) || \
       defined(TINY_GSM_MODEM_SIM5300) || defined(TINY_GSM_MODEM_SIM7100)
