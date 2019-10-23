@@ -46,6 +46,7 @@
   #include <TinyGsmClientSIM7020E.h>
   typedef TinyGsmSim7020E TinyGsm;
   typedef TinyGsmSim7020E::GsmClient TinyGsmClient;
+  typedef TinyGsmSim7020E::UDPClient TinyGsmClientUDP;
   typedef TinyGsmSim7020E::CoAPClient TinyGsmCoAPClient;
   typedef TinyGsmSim7020E::GsmClientSecure TinyGsmClientSecure;
 

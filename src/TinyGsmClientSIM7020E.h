@@ -18,6 +18,11 @@
 
 #define TINY_GSM_MUX_COUNT 5
 
+
+#if defined(TINY_GSM_USE_HEX)
+  #define TINY_GSM_USE_HEX
+#endif
+
 #include <TinyGsmCommon.h>
 
 #define GSM_NL "\r\n"
@@ -25,13 +30,13 @@ static const char GSM_OK[] TINY_GSM_PROGMEM = "OK" GSM_NL;
 static const char GSM_ERROR[] TINY_GSM_PROGMEM = "ERROR" GSM_NL;
 static const char hexmap[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
 
-enum SimStatus {
+enum SimStatus: uint8_t {
   SIM_ERROR = 0,
   SIM_READY = 1,
   SIM_LOCKED = 2,
 };
 
-enum RegStatus {
+enum RegStatus: uint8_t {
   REG_UNREGISTERED = 0,
   REG_SEARCHING    = 2,
   REG_DENIED       = 3,
@@ -40,10 +45,16 @@ enum RegStatus {
   REG_UNKNOWN      = 4,
 };
 
-enum TinyGSMDateTimeFormat {
+enum TinyGSMDateTimeFormat: uint8_t {
   DATE_FULL = 0,
   DATE_TIME = 1,
   DATE_DATE = 2
+};
+
+enum TinyGSMProto: uint8_t{
+  TCP = 1,
+  UDP = 2,
+  RAW = 3
 };
 
 class TinyGsmSim7020E
@@ -72,7 +83,7 @@ public:
       prev_check = 0;
       sock_connected = false;
       got_data = false;
-
+      proto = TinyGSMProto::TCP;
       at->sockets[mux] = this;
 
       return true;
@@ -123,6 +134,31 @@ public:
     bool            sock_connected;
     bool            got_data;
     RxFifo          rx;
+    TinyGSMProto    proto;
+  };
+
+  class UDPClient : public GsmClient
+  {
+    friend class TinyGsmSim7020E;
+  public:
+    UDPClient() {}
+    UDPClient(TinyGsmSim7020E& modem, uint8_t mux = 0) {
+      init(&modem, mux);
+      proto = TinyGSMProto::UDP;
+    }
+    virtual ~UDPClient(){}
+
+  public:
+    virtual int connect(const char *host, uint16_t port, int timeout_s) {
+      stop();
+      TINY_GSM_YIELD();
+      rx.clear();
+      sock_connected = at->modemConnect(host, port, TinyGSMProto::UDP, &mux, false, timeout_s);
+      if (sock_connected) {
+        at->sockets[mux] = this;
+      }
+      return sock_connected;
+    }
   };
 
   class CoAPClient : public GsmClient
@@ -240,6 +276,7 @@ public:
     this->at = modem;
     this->mux = mux;
     at->sockets[mux] = this;
+    proto = TinyGSMProto::TCP;
     return true;
   }
 
@@ -351,6 +388,7 @@ public:
   TinyGsmSim7020E(Stream& stream)
     : stream(stream)
   {
+    stream.setTimeout(2000);
     memset(sockets, 0, sizeof(sockets));
   }
 
@@ -821,12 +859,31 @@ TINY_GSM_MODEM_GET_GPRS_IP_CONNECTED()
 protected:
 
   bool modemConnect(const char* host, uint16_t port, uint8_t *mux,
+                  bool ssl = false, int timeout_s = 75){
+    return modemConnect(host, port, TinyGSMProto::TCP, mux, ssl, timeout_s);
+  }
+
+  bool modemConnect(const char* host, uint16_t port, TinyGSMProto proto, uint8_t *mux,
                     bool ssl = false, int timeout_s = 75){
+
     if (ssl) {
       DBG("### SSL not yet supported on this module!");
     }
-
-    sendAT(GF("+CSOC=1,1,1"));
+    /*
+    AT+CSOC=<domain>,<type>,<protocol>
+    <domain> Integer
+      1 IPv4
+      2 IPv6
+    <type> Integer
+      1 TCP
+      2 UDP
+      3 RAW
+    <protocol> Integer
+      1 IP
+      2 ICMP
+      3 UDP_LITE
+    */
+    sendAT(GF("+CSOC=1,"),proto,GF(",1"));
     if (waitResponse(60000L, GF("+CSOC: ")) != 1){
       return false;
     }
@@ -835,8 +892,9 @@ protected:
 
     DBG(GF("### +CSOC: OK, "), newMux);
 
-    // sendAT(GF("+CSORCVFLAG=1"));
-    // waitResponse(2000L, GSM_OK, GSM_ERROR);
+    //return data in HEX
+    sendAT(GF("+CSORCVFLAG=0"));
+    waitResponse(2000L, GSM_OK, GSM_ERROR);
 
     // sendAT(GF("+CSOSENDFLAG=1"));
     // waitResponse(2000L, GSM_OK, GSM_ERROR);
@@ -873,12 +931,21 @@ protected:
     }else{
       DBG(GF("### SOCKET state OK"));
     }
+#ifdef TINY_GSM_USE_HEX
+    sendAT(GF("+CSOSEND="), mux, ',', len,",\"", (char*)buff, "\"");
+#else
     String msg = hexStr((char*)buff, len);
-    sendAT(GF("+CSOSEND="), mux, ',', msg.length(),",\"", msg, "\"");
+    sendAT(GF("+CSOSEND="), mux, ',', msg.length(),",\"", msg, "\""); 
+#endif
     if (waitResponse(2000, GSM_OK) != 1){
       DBG(GF("### CMD SEND: FAILED"));
       return 0;
     }
+    if (sockets[mux]->proto == TinyGSMProto::TCP && waitResponse(5000, GF("SEND: ")) != 1){
+      DBG(GF("### TCP SEND: FAILED"));
+      //return 0;
+    }
+    stream.readStringUntil('\n');
     return len;
   }
 
@@ -1018,19 +1085,41 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
         } else if (data.endsWith(GF(GSM_NL "+CSONMI:"))){
             int mux = stream.readStringUntil(',').toInt();
             int len = stream.readStringUntil(',').toInt();
-            DBG("### +CSONMI SOCKET: ", mux, ", ERROR: ", len);
+            DBG("### +CSONMI SOCKET: ", mux, ", LEN: ", len);
             
-            int len_orig = len;
-            if (len > sockets[mux]->rx.free()) {
+            // int len_orig = len;
+            // if (len > sockets[mux]->rx.free()) {
+            //   DBG("### Buffer overflow: ", len, "->", sockets[mux]->rx.free());
+            // } else {
+            //   DBG("### Got: ", len, "->", sockets[mux]->rx.free());
+            // }
+            // while (len--) {
+            //   TINY_GSM_MODEM_STREAM_TO_MUX_FIFO_WITH_DOUBLE_TIMEOUT
+            // }
+
+            int len_orig = len/2;
+            if (len_orig > sockets[mux]->rx.free()) {
               DBG("### Buffer overflow: ", len, "->", sockets[mux]->rx.free());
             } else {
-              DBG("### Got: ", len, "->", sockets[mux]->rx.free());
+              DBG("### Got: ", len_orig, "->", sockets[mux]->rx.free());
             }
-            while (len--) {
-              TINY_GSM_MODEM_STREAM_TO_MUX_FIFO_WITH_DOUBLE_TIMEOUT
+            String hex = stream.readStringUntil('\r');
+            streamSkipUntil('\n');
+            hex = TinyGsmDecodeHex8bit(hex);
+
+            if(sockets[mux]->proto == TinyGSMProto::UDP){
+              // Write len before message
+              DBG(F("### Protocol is UDP"));
+              sockets[mux]->rx.put(hex.length() >> 4);
+              sockets[mux]->rx.put(hex.length() & 0x00FF);
+            }else DBG(F("### Protocol: "), sockets[mux]->proto);
+
+            for (unsigned i=0; i<hex.length(); i++) {
+                sockets[mux]->rx.put(hex[i]);
             }
+
             sockets[mux]->got_data = true;
-            sockets[mux]->sock_available = len;
+            sockets[mux]->sock_available = hex.length();
             if (len_orig > sockets[mux]->available()) {
               DBG("### Fewer characters received than expected: ", sockets[mux]->available(), " vs ", len_orig);
             }
@@ -1068,7 +1157,6 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
             //+CTLSRECV: 1,-80
             //+CTLSRECV: 1,10,"00000100C8",802
             int mux = stream.readStringUntil(',').toInt();
-            DBG(GF("### +CTLSRECV TLS ID: "), mux);
             int len;
             char c = stream.read();
             if (c == '-'){
@@ -1082,7 +1170,6 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
               DBG("### +CTLSRECV TLS ID: ", mux, ", LEN: ", len);
             }
 
-            
             if (len >= 0){
               stream.readStringUntil('"'); //received data into quotes "", skip at the begin
             
@@ -1099,7 +1186,7 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
               for (unsigned i=0; i<hex.length(); i++) {
                 sockets[mux]->rx.put(hex[i]);
               }
-             
+
               sockets[mux]->got_data = true;
               sockets[mux]->sock_available = hex.length();
               if (len_orig > sockets[mux]->available()) {
