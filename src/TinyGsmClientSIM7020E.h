@@ -144,11 +144,22 @@ public:
     UDPClient() {}
     UDPClient(TinyGsmSim7020E& modem, uint8_t mux = 0) {
       init(&modem, mux);
-      proto = TinyGSMProto::UDP;
     }
     virtual ~UDPClient(){}
 
-  public:
+    bool init(TinyGsmSim7020E* modem, uint8_t mux = 0) {
+      this->at = modem;
+      this->mux = mux;
+      sock_available = 0;
+      prev_check = 0;
+      sock_connected = false;
+      got_data = false;
+      proto = TinyGSMProto::UDP;
+      at->sockets[mux] = this;
+
+      return true;
+    }
+
     virtual int connect(const char *host, uint16_t port, int timeout_s) {
       stop();
       TINY_GSM_YIELD();
@@ -487,6 +498,23 @@ TINY_GSM_MODEM_MAINTAIN_LISTEN()
   }
 
 TINY_GSM_MODEM_GET_INFO_ATI()
+
+  String queryDNS(const char* domain){
+    String result = "";
+    sendAT(GF("+CDNSGIP=\""), domain, GF("\""));
+    if(waitResponse(GSM_OK, GSM_ERROR) != 1){
+      DBG(F("### Faild send +CDNSGIP"));
+      return "";
+    }
+    if(waitResponse(5000L, GF("+CDNSGIP: 1,"), GF("+CDNSGIP: 0,")) != 1){
+      DBG(F("### Faild response +CDNSGIP"));
+      return "";
+    }
+    streamSkipUntil(',');
+    streamSkipUntil('"');
+    result = stream.readStringUntil('"');
+    return result;
+  }
 
   bool hasSSL() {
     return true;
