@@ -18,11 +18,6 @@
 
 #define TINY_GSM_MUX_COUNT 5
 
-
-#if defined(TINY_GSM_USE_HEX)
-  #define TINY_GSM_USE_HEX
-#endif
-
 #include <TinyGsmCommon.h>
 
 #define GSM_NL "\r\n"
@@ -85,11 +80,20 @@ public:
       got_data = false;
       proto = TinyGSMProto::TCP;
       at->sockets[mux] = this;
-
+      setConvertDataToHEX(true); //by default send data in HEX mode
+      setStoreDataLen(false);
       return true;
     }
 
   public:
+    void setConvertDataToHEX(bool flag){
+      convert_data_to_hex = flag;
+    }
+
+    void setStoreDataLen(bool flag){
+      store_data_len = flag;
+    }
+
     virtual int connect(const char *host, uint16_t port, int timeout_s) {
       stop();
       TINY_GSM_YIELD();
@@ -135,6 +139,8 @@ public:
     bool            got_data;
     RxFifo          rx;
     TinyGSMProto    proto;
+    bool            convert_data_to_hex;
+    bool            store_data_len;
   };
 
   class UDPClient : public GsmClient
@@ -156,7 +162,8 @@ public:
       got_data = false;
       proto = TinyGSMProto::UDP;
       at->sockets[mux] = this;
-
+      setConvertDataToHEX(false);
+      setStoreDataLen(true);
       return true;
     }
 
@@ -192,7 +199,8 @@ public:
       got_data = false;
 
       at->sockets[mux] = this;
-
+      setConvertDataToHEX(false);
+      setStoreDataLen(false);
       return true;
     }
 
@@ -288,6 +296,8 @@ public:
     this->mux = mux;
     at->sockets[mux] = this;
     proto = TinyGSMProto::TCP;
+    setConvertDataToHEX(true);
+    setStoreDataLen(false);
     return true;
   }
 
@@ -370,8 +380,12 @@ private:
     DBG(GF("### TLS SEND: "), (char*)buff, ", LEN: ", len, ", ID: ", mux);
 
     at->waitResponse(50);
-    String s = at->hexStr((char*)buff, len);
-    at->sendAT(GF("+CTLSSEND="), mux, GF(','), s.length(), GF(",\""), s, GF("\",802"));
+    if(at->sockets[mux]->convert_data_to_hex){
+      String s = at->hexStr((char*)buff, len);
+      at->sendAT(GF("+CTLSSEND="), mux, GF(','), s.length(), GF(",\""), s, GF("\",802"));
+    }else{
+      at->sendAT(GF("+CTLSSEND="), mux, GF(','), len, GF(",\""), (char*)buff, GF("\",801"));
+    }
     if (at->waitResponse(2000, GSM_OK) != 1){
       DBG(GF("### TLS SEND: FAILED"));
       return 0;
@@ -959,17 +973,17 @@ protected:
     }else{
       DBG(GF("### SOCKET state OK"));
     }
-#ifdef TINY_GSM_USE_HEX
-    sendAT(GF("+CSOSEND="), mux, ',', len,",\"", (char*)buff, "\"");
-#else
-    String msg = hexStr((char*)buff, len);
-    sendAT(GF("+CSOSEND="), mux, ',', msg.length(),",\"", msg, "\""); 
-#endif
+    if(sockets[mux]->convert_data_to_hex){
+      String msg = hexStr((char*)buff, len);
+      sendAT(GF("+CSOSEND="), mux, ',', msg.length(),",\"", msg, "\""); 
+    }else{
+      sendAT(GF("+CSOSEND="), mux, ',', len,",\"", (char*)buff, "\"");
+    }
     if (waitResponse(2000, GSM_OK) != 1){
       DBG(GF("### CMD SEND: FAILED"));
       return 0;
     }
-    if (sockets[mux]->proto == TinyGSMProto::TCP && waitResponse(5000, GF("SEND: ")) != 1){
+    if (sockets[mux]->proto == TinyGSMProto::TCP && waitResponse(6000, GF("SEND: ")) != 1){
       DBG(GF("### TCP SEND: FAILED"));
       //return 0;
     }
@@ -1114,16 +1128,6 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
             int mux = stream.readStringUntil(',').toInt();
             int len = stream.readStringUntil(',').toInt();
             DBG("### +CSONMI SOCKET: ", mux, ", LEN: ", len);
-            
-            // int len_orig = len;
-            // if (len > sockets[mux]->rx.free()) {
-            //   DBG("### Buffer overflow: ", len, "->", sockets[mux]->rx.free());
-            // } else {
-            //   DBG("### Got: ", len, "->", sockets[mux]->rx.free());
-            // }
-            // while (len--) {
-            //   TINY_GSM_MODEM_STREAM_TO_MUX_FIFO_WITH_DOUBLE_TIMEOUT
-            // }
 
             int len_orig = len/2;
             if (len_orig > sockets[mux]->rx.free()) {
@@ -1135,9 +1139,9 @@ TINY_GSM_MODEM_STREAM_UTILITIES()
             streamSkipUntil('\n');
             hex = TinyGsmDecodeHex8bit(hex);
 
-            if(sockets[mux]->proto == TinyGSMProto::UDP){
+            if(sockets[mux]->store_data_len){
               // Write len before message
-              DBG(F("### Protocol is UDP"));
+              DBG(F("### Put data length at first"));
               sockets[mux]->rx.put(hex.length() >> 4);
               sockets[mux]->rx.put(hex.length() & 0x00FF);
             }else DBG(F("### Protocol: "), sockets[mux]->proto);
