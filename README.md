@@ -17,6 +17,22 @@ If you like **TinyGSM** - give it a star, or fork it and contribute!
 You can also join our chat:
 [![Gitter](https://img.shields.io/gitter/room/vshymanskyy/TinyGSM.svg)](https://gitter.im/tinygsm)
 
+### Modem SIM7020E NB-IoT
+For using TinyGSM together with TinyGSM lib use branch [SIM7020E](https://github.com/OloloevReal/TinyGSM/tree/SIM7020E).
+
+Just add dependency into your platformio.ini:
+
+```
+lib_deps = https://github.com/OloloevReal/TinyGSM#SIM7020E
+```
+
+And defenition in your code:
+```
+#define TINY_GSM_MODEM_SIM7020E
+```
+Also look examples
+
+
 ### Arduino Client interface support
 This library is easy to integrate with lots of sketches which use Ethernet or WiFi.
 **PubSubClient ([MQTT](http://mqtt.org/))**, **[Blynk](http://blynk.cc)**, **HTTP Client** and **File Download** examples are provided.
